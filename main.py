@@ -1,60 +1,45 @@
 #!/usr/bin/env python3
 """
-jwt_api.py — Flask JWT generator (single file)
-
-Endpoints:
-  GET  /                     → info
-  GET  /health               → health check
-  POST /api/jwt              → generate JWT from uid + password
-  POST /api/jwt/from-token   → generate JWT from access_token + open_id
-  GET  /api/jwt              → same as POST but via query params
-
-Run:
-  pip install flask requests pycryptodome
-  python3 jwt_api.py
+JWT Generator — Flask API
+Deployable on Vercel, Railway, Fly.io, Render, or locally.
 """
-import os, sys, json, base64, time, codecs
+import os, sys, json, base64, time
 from flask import Flask, request, jsonify
 import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
-# Suppress InsecureRequestWarning
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # ============================================================
-# SETTINGS
+# SETTINGS (env vars override)
 # ============================================================
-class Settings:
-    MAIN_KEY_B64 = "WWcmdGMlREV1aDYlWmNeOA=="
-    MAIN_IV_B64  = "Nm95WkRyMjJFM3ljaGpNJQ=="
+MAIN_KEY_B64    = "WWcmdGMlREV1aDYlWmNeOA=="
+MAIN_IV_B64     = "Nm95WkRyMjJFM3ljaGpNJQ=="
 
-    RELEASE_VERSION = "OB55"
-    X_UNITY_VERSION = "2018.4.11f1"
-    TIMEOUT         = 15.0
+RELEASE_VERSION = os.environ.get("RELEASE_VERSION", "OB55")
+X_UNITY_VERSION = os.environ.get("X_UNITY_VERSION", "2018.4.11f1")
+TIMEOUT         = float(os.environ.get("TIMEOUT", "20"))
 
-    USER_AGENT     = "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)"
-    MAJOR_LOGIN_UA = ("Dalvik/2.1.0 (Linux; U; Android 15; I2404 "
-                      "Build/AP3A.240905.015.A2_V000L1)")
+USER_AGENT      = os.environ.get("USER_AGENT",
+                  "GarenaMSDK/4.0.19P10(I2404 ;Android 15;en;US;)")
+MAJOR_LOGIN_UA  = os.environ.get("MAJOR_LOGIN_UA",
+                  "Dalvik/2.1.0 (Linux; U; Android 15; I2404 "
+                  "Build/AP3A.240905.015.A2_V000L1)")
 
-    OAUTH_URL       = "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant"
-    MAJOR_LOGIN_URL = "https://loginbp.ggwhitehawk.com/MajorLogin"
+OAUTH_URL       = os.environ.get("OAUTH_URL",
+                  "https://ffmconnect.live.gop.garenanow.com/api/v2/oauth/guest/token:grant")
+MAJOR_LOGIN_URL = os.environ.get("MAJOR_LOGIN_URL",
+                  "https://loginbp.ppmainecoonghj.com/MajorLogin")
 
-    CLIENT_SECRET   = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
-    CLIENT_ID       = 100067
+CLIENT_SECRET   = os.environ.get("CLIENT_SECRET",
+                  "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3")
+CLIENT_ID       = int(os.environ.get("CLIENT_ID", "100067"))
 
-    @property
-    def MAIN_KEY(self) -> bytes:
-        return base64.b64decode(self.MAIN_KEY_B64)
-
-    @property
-    def MAIN_IV(self) -> bytes:
-        return base64.b64decode(self.MAIN_IV_B64)
-
-
-settings = Settings()
+MAIN_KEY = base64.b64decode(MAIN_KEY_B64)
+MAIN_IV  = base64.b64decode(MAIN_IV_B64)
 
 
 # ============================================================
@@ -70,7 +55,7 @@ def aes_cbc_encrypt(key: bytes, iv: bytes, plaintext: bytes) -> bytes:
 
 
 # ============================================================
-# MINIMAL PROTOBUF  (no .proto files)
+# MINIMAL PROTOBUF
 # ============================================================
 def _ev(n):
     o = []
@@ -106,16 +91,13 @@ def _rv(b, p):
 
 
 def parse_proto(buf, depth=6):
-    """Walk a protobuf message; returns dict {field: value}."""
     if depth < 0 or not buf:
         return {}
     out = {}
     p = 0
     while p < len(buf):
-        try:
-            tag, p = _rv(buf, p)
-        except ValueError:
-            return out
+        try: tag, p = _rv(buf, p)
+        except ValueError: return out
         f, w = tag >> 3, tag & 7
         if w == 0:
             try: v, p = _rv(buf, p)
@@ -130,13 +112,9 @@ def parse_proto(buf, depth=6):
                 s = chunk.decode()
                 if all(c.isprintable() or c in "\r\n\t" for c in s):
                     out[f] = s; continue
-            except Exception:
-                pass
+            except Exception: pass
             nested = parse_proto(chunk, depth - 1)
-            if nested:
-                out[f] = nested
-            else:
-                out[f] = chunk.hex()
+            out[f] = nested if nested else chunk.hex()
         elif w == 5:
             if p + 4 > len(buf): return out
             p += 4
@@ -149,18 +127,10 @@ def parse_proto(buf, depth=6):
 
 
 # ============================================================
-# LoginReq protobuf (fields from LoginReq.proto)
+# LoginReq message
 # ============================================================
-def build_login_req(open_id: str, open_id_type: str, login_token: str,
-                    origin_platform_type: str) -> bytes:
-    """
-    message LoginReq {
-      string open_id                = 1;
-      string open_id_type           = 2;
-      string login_token            = 3;
-      string orign_platform_type    = 4;
-    }
-    """
+def build_login_req(open_id, open_id_type, login_token, origin_platform_type):
+    """message LoginReq { 1: open_id, 2: open_id_type, 3: login_token, 4: orign_platform_type }"""
     return build_proto({
         1: open_id,
         2: open_id_type,
@@ -170,86 +140,9 @@ def build_login_req(open_id: str, open_id_type: str, login_token: str,
 
 
 # ============================================================
-# OAUTH  — uid + password → access_token + open_id
+# HELPERS
 # ============================================================
-def get_access_token(uid: str, password: str):
-    payload = {
-        "client_id":     settings.CLIENT_ID,
-        "client_secret": settings.CLIENT_SECRET,
-        "client_type":   2,
-        "password":      password,
-        "response_type": "token",
-        "uid":           int(uid),
-    }
-    headers = {
-        "User-Agent":     settings.USER_AGENT,
-        "Accept":         "application/json",
-        "Content-Type":   "application/json; charset=utf-8",
-        "Connection":     "Keep-Alive",
-        "Accept-Encoding": "gzip",
-    }
-    r = requests.post(settings.OAUTH_URL, json=payload,
-                      headers=headers, verify=False, timeout=settings.TIMEOUT)
-    r.raise_for_status()
-
-    j = r.json()
-    data = j.get("data", j)
-
-    if "access_token" not in data or not data["access_token"]:
-        raise RuntimeError(f"oauth error: {json.dumps(j)[:200]}")
-
-    return data["access_token"], data["open_id"]
-
-
-# ============================================================
-# MAJOR LOGIN  — LoginReq → JWT
-# ============================================================
-def major_login(open_id: str, access_token: str) -> dict:
-    req = build_login_req(
-        open_id=open_id,
-        open_id_type="4",
-        login_token=access_token,
-        origin_platform_type="4",
-    )
-    encrypted = aes_cbc_encrypt(settings.MAIN_KEY, settings.MAIN_IV, req)
-
-    headers = {
-        "User-Agent":      settings.MAJOR_LOGIN_UA,
-        "Connection":      "Keep-Alive",
-        "Accept-Encoding": "gzip",
-        "Content-Type":    "application/octet-stream",
-        "Expect":          "100-continue",
-        "X-Unity-Version": settings.X_UNITY_VERSION,
-        "X-GA":            "v1 1",
-        "ReleaseVersion":  settings.RELEASE_VERSION,
-    }
-
-    r = requests.post(settings.MAJOR_LOGIN_URL, data=encrypted,
-                      headers=headers, verify=False, timeout=settings.TIMEOUT)
-    r.raise_for_status()
-
-    # Response is raw protobuf bytes (LoginRes)
-    decoded = parse_proto(r.content)
-
-    # LoginRes fields (from FreeFire.proto):
-    #   token          = 6  (or 3, depending on build)
-    #   lock_region    = 4
-    #   server_url     = ?
-    # We'll scan for a JWT-looking string anywhere in the decoded tree.
-    jwt = _find_jwt(decoded)
-
-    if not jwt:
-        raise RuntimeError(f"no JWT in response — decoded={json.dumps(decoded, default=str)[:300]}")
-
-    return {
-        "token":      jwt,
-        "lockRegion": _find_field(decoded, ["lock_region", "lockRegion"]) or _find_region(jwt),
-        "serverUrl":  _find_field(decoded, ["server_url", "serverUrl"]) or "",
-    }
-
-
-def _find_jwt(obj):
-    """Recursively hunt for a JWT (eyJ...) inside parsed protobuf."""
+def find_jwt(obj):
     if isinstance(obj, str):
         i = obj.find("eyJ")
         if i != -1:
@@ -258,38 +151,16 @@ def _find_jwt(obj):
             return t[:d + 44] if d != -1 else t
     elif isinstance(obj, dict):
         for v in obj.values():
-            r = _find_jwt(v)
+            r = find_jwt(v)
             if r: return r
     elif isinstance(obj, list):
         for v in obj:
-            r = _find_jwt(v)
+            r = find_jwt(v)
             if r: return r
     return ""
 
 
-def _find_field(obj, names):
-    """Best-effort: return first value whose key matches one of names (case-insensitive)."""
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            if str(k).lower() in [n.lower() for n in names]:
-                return v
-            r = _find_field(v, names)
-            if r: return r
-    return ""
-
-
-def _find_region(jwt: str) -> str:
-    """Decode JWT payload to get region from claim."""
-    try:
-        p = jwt.split(".")[1]
-        p += "=" * ((4 - len(p) % 4) % 4)
-        pl = json.loads(base64.urlsafe_b64decode(p).decode())
-        return pl.get("noti_region") or pl.get("lock_region") or ""
-    except Exception:
-        return ""
-
-
-def decode_jwt_payload(jwt: str) -> dict:
+def decode_jwt_payload(jwt):
     try:
         p = jwt.split(".")[1]
         p += "=" * ((4 - len(p) % 4) % 4)
@@ -299,18 +170,81 @@ def decode_jwt_payload(jwt: str) -> dict:
 
 
 # ============================================================
-# FLASK APP
+# OAUTH
+# ============================================================
+def get_access_token(uid, password):
+    payload = {
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "client_type":   2,
+        "password":      password,
+        "response_type": "token",
+        "uid":           int(uid),
+    }
+    headers = {
+        "User-Agent":      USER_AGENT,
+        "Accept":          "application/json",
+        "Content-Type":    "application/json; charset=utf-8",
+        "Connection":      "Keep-Alive",
+        "Accept-Encoding": "gzip",
+    }
+    r = requests.post(OAUTH_URL, json=payload, headers=headers,
+                      verify=False, timeout=TIMEOUT)
+    r.raise_for_status()
+    j = r.json()
+    data = j.get("data", j)
+    if "access_token" not in data or not data["access_token"]:
+        raise RuntimeError(f"oauth error: {json.dumps(j)[:200]}")
+    return data["access_token"], data["open_id"]
+
+
+# ============================================================
+# MAJOR LOGIN
+# ============================================================
+def major_login(open_id, access_token):
+    req = build_login_req(
+        open_id=open_id,
+        open_id_type="4",
+        login_token=access_token,
+        origin_platform_type="4",
+    )
+    encrypted = aes_cbc_encrypt(MAIN_KEY, MAIN_IV, req)
+
+    headers = {
+        "User-Agent":      MAJOR_LOGIN_UA,
+        "Connection":      "Keep-Alive",
+        "Accept-Encoding": "gzip",
+        "Content-Type":    "application/octet-stream",
+        "Expect":          "100-continue",
+        "X-Unity-Version": X_UNITY_VERSION,
+        "X-GA":            "v1 1",
+        "ReleaseVersion":  RELEASE_VERSION,
+    }
+    r = requests.post(MAJOR_LOGIN_URL, data=encrypted, headers=headers,
+                      verify=False, timeout=TIMEOUT)
+    r.raise_for_status()
+    decoded = parse_proto(r.content)
+    jwt = find_jwt(decoded)
+    if not jwt:
+        raise RuntimeError(
+            f"no JWT in response — decoded={json.dumps(decoded, default=str)[:300]}"
+        )
+    return jwt
+
+
+# ============================================================
+# FLASK
 # ============================================================
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
-# CORS
+
 @app.after_request
-def add_cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    return response
+def cors(resp):
+    resp.headers["Access-Control-Allow-Origin"]  = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return resp
 
 
 @app.route("/", methods=["GET"])
@@ -319,10 +253,10 @@ def index():
         "service": "JWT Generator",
         "version": "1.0",
         "endpoints": {
-            "GET  /health":               "health check",
-            "GET  /api/jwt":              "uid + password as query params",
-            "POST /api/jwt":              "body: {uid, password}",
-            "POST /api/jwt/from-token":   "body: {access_token, open_id}",
+            "GET  /health":             "health check",
+            "GET  /api/jwt":            "uid + password (query)",
+            "POST /api/jwt":            "body: {uid, password}",
+            "POST /api/jwt/from-token": "body: {access_token, open_id}",
         },
         "example": {
             "POST /api/jwt": {"uid": "7918948306", "password": "OBSCURACODER_48291"},
@@ -353,18 +287,18 @@ def api_jwt():
 
     try:
         access_token, open_id = get_access_token(str(uid), str(password))
-        result = major_login(open_id, access_token)
-        payload = decode_jwt_payload(result["token"])
+        jwt = major_login(open_id, access_token)
+        pl  = decode_jwt_payload(jwt)
         return jsonify({
             "success":      True,
             "access_token": access_token,
             "open_id":      open_id,
-            "jwt":          result["token"],
-            "region":       payload.get("noti_region") or result.get("lockRegion"),
-            "account_id":   payload.get("account_id"),
-            "nickname":     payload.get("nickname"),
-            "is_emulator":  payload.get("is_emulator"),
-            "expires_at":   payload.get("exp"),
+            "jwt":          jwt,
+            "region":       pl.get("noti_region") or pl.get("lock_region"),
+            "account_id":   pl.get("account_id"),
+            "nickname":     pl.get("nickname"),
+            "is_emulator":  pl.get("is_emulator"),
+            "expires_at":   pl.get("exp"),
         })
     except requests.exceptions.HTTPError as e:
         return jsonify({
@@ -389,18 +323,18 @@ def api_jwt_from_token():
         return jsonify({"error": "access_token and open_id required"}), 400
 
     try:
-        result = major_login(str(open_id), str(access_token))
-        payload = decode_jwt_payload(result["token"])
+        jwt = major_login(str(open_id), str(access_token))
+        pl  = decode_jwt_payload(jwt)
         return jsonify({
             "success":      True,
             "access_token": access_token,
             "open_id":      open_id,
-            "jwt":          result["token"],
-            "region":       payload.get("noti_region") or result.get("lockRegion"),
-            "account_id":   payload.get("account_id"),
-            "nickname":     payload.get("nickname"),
-            "is_emulator":  payload.get("is_emulator"),
-            "expires_at":   payload.get("exp"),
+            "jwt":          jwt,
+            "region":       pl.get("noti_region") or pl.get("lock_region"),
+            "account_id":   pl.get("account_id"),
+            "nickname":     pl.get("nickname"),
+            "is_emulator":  pl.get("is_emulator"),
+            "expires_at":   pl.get("exp"),
         })
     except requests.exceptions.HTTPError as e:
         return jsonify({
@@ -418,20 +352,17 @@ def not_found(e):
 
 
 @app.errorhandler(500)
-def server_error(e):
+def server_err(e):
     return jsonify({"error": "internal server error"}), 500
 
 
 # ============================================================
-# MAIN
+# LOCAL DEV — Vercel imports `app`, doesn't run this block
 # ============================================================
 if __name__ == "__main__":
-    HOST = "0.0.0.0"
-    PORT = 8000
-    print(f"[*] JWT Generator API starting on http://{HOST}:{PORT}")
-    print(f"[*] Endpoints:")
-    print(f"      GET  /api/jwt?uid=...&password=...")
-    print(f"      POST /api/jwt            {{uid, password}}")
-    print(f"      POST /api/jwt/from-token {{access_token, open_id}}")
-    print()
-    app.run(host=HOST, port=PORT, debug=False, threaded=True)
+    PORT = int(os.environ.get("PORT", "8000"))
+    print(f"[*] JWT Generator API on http://0.0.0.0:{PORT}")
+    print(f"    GET  /api/jwt?uid=...&password=...")
+    print(f"    POST /api/jwt            {{uid, password}}")
+    print(f"    POST /api/jwt/from-token {{access_token, open_id}}")
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
