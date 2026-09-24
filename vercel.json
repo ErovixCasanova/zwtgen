@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "name": "jwt-generator",
+  "builds": [
+    {
+      "src": "main.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "80mb",
+        "runtime": "python3.12"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "main.py"
+    }
+  ],
+  "functions": {
+    "main.py": {
+      "maxDuration": 30,
+      "memory": 512
+    }
+  },
+  "env": {
+    "PYTHONUNBUFFERED": "1"
+  }
+}
