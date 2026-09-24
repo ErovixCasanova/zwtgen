@@ -278,15 +278,30 @@ def major_login(open_id, access_token, region="IND"):
         "Content-Type":     "application/x-www-form-urlencoded",
         "X-Unity-Version":  X_UNITY_VERSION,
     }
+
     r = requests.post(MAJOR_LOGIN_URL, data=encrypted, headers=headers,
                       verify=False, timeout=TIMEOUT)
+
+    # ---- verbose diagnostics ----
+    print(f"[DEBUG] HTTP {r.status_code}")
+    print(f"[DEBUG] response headers: {dict(r.headers)}")
+    print(f"[DEBUG] response len: {len(r.content)}")
+    print(f"[DEBUG] response hex (first 200): {r.content[:200].hex()}")
+    try:
+        decoded = parse_proto(r.content)
+        print(f"[DEBUG] decoded: {json.dumps(decoded, default=str)[:500]}")
+    except Exception as e:
+        print(f"[DEBUG] decode failed: {e}")
+        print(f"[DEBUG] raw ascii: {r.content.decode('utf-8', errors='ignore')[:200]!r}")
+    # ---- end verbose ----
+
     if r.status_code != 200:
-        # show decoded response for debugging
         try:
             decoded = parse_proto(r.content)
+            detail = json.dumps(decoded, default=str)[:300]
         except Exception:
-            decoded = {"raw_hex": r.content.hex()[:200]}
-        raise RuntimeError(f"MajorLogin HTTP {r.status_code} — {json.dumps(decoded, default=str)[:300]}")
+            detail = r.content.hex()[:200]
+        raise RuntimeError(f"MajorLogin HTTP {r.status_code} — {detail}")
 
     decoded = parse_proto(r.content)
     jwt = find_jwt(decoded)
