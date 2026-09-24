@@ -1,15 +1,7 @@
 {
   "functions": {
-    "api/index.py": {
-      "runtime": "python3.12",
-      "maxDuration": 30,
-      "memory": 512
+    "main.py": {
+      "maxDuration": 60
     }
-  },
-  "rewrites": [
-    { "source": "/(.*)", "destination": "main.py" }
-  ],
-  "env": {
-    "PYTHONUNBUFFERED": "1"
   }
 }
